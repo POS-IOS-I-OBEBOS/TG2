@@ -3,99 +3,101 @@
 from __future__ import annotations
 
 import logging
-import tempfile
-from pathlib import Path
+from io import BytesIO
 
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ContextTypes
 
-from .config import Settings
-from .ocr import extract_text
+from .ocr import OCRSpaceError, recognize_excise_stamp
 
 LOGGER = logging.getLogger(__name__)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /start command."""
+    """Send a greeting message when the bot is started."""
 
-    assert update.effective_chat
-    await update.effective_chat.send_message(
-        "Здравствуйте!\n"
-        "Отправьте мне фотографию акцизной марки, и я распознаю её текст.",
+    if update.message is None:
+        return
+
+    LOGGER.info("Received /start from chat_id=%s", update.message.chat_id)
+    await update.message.reply_text(
+        "Здравствуйте! Отправьте фотографию акцизной марки, и я постараюсь распознать текст."  # noqa: E501
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /help command."""
+    """Provide usage information."""
 
-    assert update.effective_chat
-    await update.effective_chat.send_message(
-        "Отправьте фотографию акцизной марки."
-        "\nМожно также указать желаемые языки через переменную OCR_LANGUAGES"
-        " (например, 'ru,en').",
+    if update.message is None:
+        return
+
+    LOGGER.info("Received /help from chat_id=%s", update.message.chat_id)
+    await update.message.reply_text(
+        "Просто отправьте фото акцизной марки. Я преобразую изображение в текст, используя OCR.space."
     )
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Process an incoming photo and respond with OCR results."""
+    """Process an incoming photo and run OCR on it."""
 
-    message = update.effective_message
-    if message is None:
+    if update.message is None or not update.message.photo:
         return
 
-    assert context.application is not None
-    settings: Settings = context.application.bot_data["settings"]
+    LOGGER.info(
+        "Received photo message from chat_id=%s with %d sizes",
+        update.message.chat_id,
+        len(update.message.photo),
+    )
+    await update.message.chat.send_action(action=ChatAction.TYPING)
 
-    photo = message.photo[-1] if message.photo else None
-    if not photo:
-        await message.reply_text("Не удалось получить фотографию. Попробуйте ещё раз.")
-        return
+    photo = update.message.photo[-1]
+    bot = context.bot
+    file = await bot.get_file(photo.file_id)
 
-    await message.chat.send_action(action=ChatAction.TYPING)
+    buffer = BytesIO()
+    await file.download_to_memory(out=buffer)
+    image_bytes = buffer.getvalue()
+    LOGGER.info(
+        "Downloaded photo for chat_id=%s with %d bytes",
+        update.message.chat_id,
+        len(image_bytes),
+    )
 
-    telegram_file = await photo.get_file()
+    settings = context.application.bot_data["settings"]
 
     try:
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
-            tmp_path = Path(tmp_file.name)
-        await telegram_file.download_to_drive(str(tmp_path))
-
-        try:
-            lines = await extract_text(str(tmp_path), settings)
-        finally:
-            tmp_path.unlink(missing_ok=True)
-    except Exception as exc:  # pragma: no cover - defensive branch
-        LOGGER.exception("Failed to process image: %s", exc)
-        await message.reply_text(
-            "Произошла ошибка при обработке изображения. Попробуйте позже."
+        LOGGER.info(
+            "Sending image for OCR: chat_id=%s language=%s",
+            update.message.chat_id,
+            settings.ocr_language,
+        )
+        text = await recognize_excise_stamp(
+            image_bytes,
+            api_key=settings.ocr_api_key,
+            language=settings.ocr_language,
+        )
+    except OCRSpaceError as exc:
+        LOGGER.exception("OCR processing error: %s", exc)
+        await update.message.reply_text(
+            "Не удалось распознать текст: {error}".format(error=exc)
+        )
+        return
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Unexpected error: %s", exc)
+        await update.message.reply_text(
+            "Произошла неожиданная ошибка при обработке изображения."
         )
         return
 
-    if not lines:
-        await message.reply_text("Не удалось распознать текст на изображении.")
-        return
-
-    response = "\n".join(f"• {line}" for line in lines)
-    await message.reply_text("Распознанный текст:\n" + response)
-
-
-async def post_init(application: Application) -> None:
-    """Store settings in application state for handlers."""
-
-    settings: Settings = application.bot_data["settings"]
-    LOGGER.info(
-        "Bot initialised with languages: %s (GPU=%s)",
-        ",".join(settings.languages),
-        settings.use_gpu,
-    )
-
-
-def register(application: Application, settings: Settings) -> None:
-    """Register handlers on the provided application."""
-
-    application.bot_data["settings"] = settings
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.post_init.append(post_init)
+    text = text.strip()
+    if text:
+        LOGGER.info("OCR succeeded for chat_id=%s with %d characters", update.message.chat_id, len(text))
+        await update.message.reply_text(
+            "Распознанный текст:\n\n{result}".format(result=text)
+        )
+    else:
+        LOGGER.info("OCR returned empty result for chat_id=%s", update.message.chat_id)
+        await update.message.reply_text(
+            "К сожалению, не удалось распознать текст на изображении. Попробуйте другое фото."
+        )

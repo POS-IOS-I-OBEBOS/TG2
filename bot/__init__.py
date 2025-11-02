@@ -1,1 +1,1 @@
-"""Telegram excise stamp OCR bot package."""
+"""Telegram excise stamp bot package."""

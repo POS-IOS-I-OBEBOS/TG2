@@ -1,44 +1,56 @@
-"""Configuration helpers for the Telegram OCR bot."""
+"""Configuration helpers for the Telegram excise stamp bot."""
 
 from __future__ import annotations
 
+import getpass
 import os
 from dataclasses import dataclass
 
 
-class ConfigError(RuntimeError):
-    """Raised when a required configuration option is missing."""
-
-
 @dataclass(frozen=True)
 class Settings:
-    """Application settings resolved from environment variables."""
+    """Application settings loaded from environment variables."""
 
     bot_token: str
-    languages: tuple[str, ...] = ("ru", "en")
-    use_gpu: bool = False
+    ocr_api_key: str
+    ocr_language: str = "eng"
+    log_file: str = "bot.log.txt"
 
+    @staticmethod
+    def from_env() -> "Settings":
+        """Load settings from environment variables.
 
-def _parse_bool(value: str | None, *, default: bool = False) -> bool:
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y"}
+        Returns:
+            Settings: Populated settings object.
 
+        Raises:
+            RuntimeError: If the bot token is missing.
+        """
 
-def load_settings() -> Settings:
-    """Read configuration from environment variables."""
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if not bot_token:
+            bot_token = Settings._prompt_bot_token()
 
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise ConfigError(
-            "Environment variable TELEGRAM_BOT_TOKEN must be set to run the bot."
+        api_key = os.getenv("OCR_SPACE_API_KEY", "helloworld")
+        language = os.getenv("OCR_LANGUAGE", "eng")
+        log_file = os.getenv("BOT_LOG_FILE", "bot.log.txt")
+        return Settings(
+            bot_token=bot_token,
+            ocr_api_key=api_key,
+            ocr_language=language,
+            log_file=log_file,
         )
 
-    languages_env = os.getenv("OCR_LANGUAGES", "ru,en")
-    languages = tuple(part.strip() for part in languages_env.split(",") if part.strip())
-    if not languages:
-        languages = ("ru", "en")
+    @staticmethod
+    def _prompt_bot_token() -> str:
+        """Prompt the user for a Telegram bot token via the command line."""
 
-    use_gpu = _parse_bool(os.getenv("OCR_USE_GPU"))
+        while True:
+            token = getpass.getpass("Введите токен Telegram-бота: ").strip()
+            if token:
+                return token
 
-    return Settings(bot_token=token, languages=languages, use_gpu=use_gpu)
+            print("Токен не может быть пустым. Повторите ввод.")
+
+
+settings = Settings.from_env()

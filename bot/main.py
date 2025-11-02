@@ -1,64 +1,64 @@
-"""Entry-point for running the Telegram OCR bot."""
+"""Entry point for the Telegram excise stamp bot."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import signal
-from contextlib import suppress
+from pathlib import Path
 
-from telegram.ext import Application
+from telegram.ext import (
+    AIORateLimiter,
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
-from .config import ConfigError, Settings, load_settings
-from .handlers import register
+from . import config
+from .handlers import handle_photo, help_command, start
 
 LOGGER = logging.getLogger(__name__)
 
 
-async def run_bot(settings: Settings) -> None:
-    """Configure and start the Telegram bot."""
+def configure_logging(log_file: str) -> None:
+    """Configure logging handlers for console and file output."""
 
-    application = Application.builder().token(settings.bot_token).build()
-    register(application, settings)
+    log_path = Path(log_file)
+    if log_path.parent:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    await application.initialize()
-    await application.start()
-
-    LOGGER.info("Bot is running. Press Ctrl+C to exit.")
-
-    stop_event = asyncio.Event()
-
-    loop = asyncio.get_running_loop()
-
-    def _handle_signal(signum: int, _frame) -> None:  # pragma: no cover - signal handler
-        LOGGER.info("Received signal %s, shutting down...", signum)
-        stop_event.set()
-
-    for signame in (signal.SIGINT, signal.SIGTERM):
-        with suppress(NotImplementedError):
-            loop.add_signal_handler(signame, _handle_signal, signame, None)
-
-    await stop_event.wait()
-
-    await application.stop()
-    await application.shutdown()
+    logging.basicConfig(
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
+        handlers=[
+            logging.FileHandler(log_path, encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+        force=True,
+    )
 
 
 def main() -> None:
-    """Program entry-point."""
+    """Synchronously run the bot."""
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    settings = config.settings
+    configure_logging(settings.log_file)
+    LOGGER.info("Starting Telegram bot with polling mode")
+
+    application: Application = (
+        ApplicationBuilder()
+        .token(settings.bot_token)
+        .rate_limiter(AIORateLimiter())
+        .build()
     )
 
-    try:
-        settings = load_settings()
-    except ConfigError as exc:
-        LOGGER.error("Configuration error: %s", exc)
-        raise SystemExit(1) from exc
+    application.bot_data["settings"] = settings
 
-    asyncio.run(run_bot(settings))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    application.run_polling()
 
 
 if __name__ == "__main__":

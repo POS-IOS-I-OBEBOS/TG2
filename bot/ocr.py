@@ -1,51 +1,66 @@
-"""OCR utilities used by the Telegram bot."""
+"""OCR utilities for recognizing excise stamps."""
 
 from __future__ import annotations
 
-import asyncio
-from functools import partial
-from typing import Iterable, Optional
+from typing import Any
 
-import easyocr
-
-from .config import Settings
-
-_reader: Optional[easyocr.Reader] = None
-_reader_lock = asyncio.Lock()
+import httpx
 
 
-async def get_reader(settings: Settings) -> easyocr.Reader:
-    """Initialise (if necessary) and return a cached EasyOCR reader."""
+class OCRSpaceError(RuntimeError):
+    """Raised when the OCR.space API returns an error."""
 
-    global _reader
-    if _reader is not None:
-        return _reader
 
-    async with _reader_lock:
-        if _reader is not None:
-            return _reader
+async def recognize_excise_stamp(
+    image_bytes: bytes,
+    api_key: str,
+    *,
+    language: str = "eng",
+    timeout: float = 60.0,
+) -> str:
+    """Recognize text on an excise stamp using the OCR.space API.
 
-        loop = asyncio.get_running_loop()
-        reader = await loop.run_in_executor(
-            None,
-            lambda: easyocr.Reader(
-                list(settings.languages),
-                gpu=settings.use_gpu,
-            ),
+    Args:
+        image_bytes: Raw bytes of the image to be recognized.
+        api_key: API key for the OCR.space service. Use ``"helloworld"`` for the
+            free tier with limited throughput.
+        language: Optional OCR language code, defaults to ``"eng"``.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        Recognized text.
+
+    Raises:
+        OCRSpaceError: If the OCR service reports an error.
+    """
+
+    headers = {"apikey": api_key}
+    data = {"language": language, "isOverlayRequired": False}
+    files = {"file": ("excise_stamp.jpg", image_bytes)}
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+        response = await client.post(
+            "https://api.ocr.space/parse/image",
+            headers=headers,
+            data=data,
+            files=files,
         )
-        _reader = reader
-        return reader
 
+    response.raise_for_status()
+    payload: dict[str, Any] = response.json()
 
-async def extract_text(image_path: str, settings: Settings) -> list[str]:
-    """Run OCR on the provided image and return extracted text lines."""
+    if payload.get("IsErroredOnProcessing"):
+        error_message = payload.get("ErrorMessage") or payload.get("ErrorDetails")
+        raise OCRSpaceError(str(error_message))
 
-    reader = await get_reader(settings)
+    parsed_results = payload.get("ParsedResults") or []
+    if not parsed_results:
+        return ""
 
-    loop = asyncio.get_running_loop()
-    results: Iterable[str] = await loop.run_in_executor(
-        None,
-        partial(reader.readtext, image_path, detail=0, paragraph=False, min_size=5),
-    )
+    text_chunks = []
+    for result in parsed_results:
+        parsed_text = result.get("ParsedText")
+        if parsed_text:
+            text_chunks.append(parsed_text.strip())
 
-    return [line.strip() for line in results if line and line.strip()]
+    return "\n".join(chunk for chunk in text_chunks if chunk)
